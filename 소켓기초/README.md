@@ -178,3 +178,194 @@ UDP 에코 포트번호 (호스트 순서) : 7
 ```
 
 - x86 CPU이기 때문에 little-endian이 적용된 모습이다. 정수 1792는 0x0007의 바이트 숫자가 0x0700로 바뀐 십진수 값임.
+
+### daytime 서비스 접속 예제
+
+```c
+// mydaytime.c
+// daytime 서비스를 요청하는 tcp 클라이언트.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define MAXLINE 127
+
+int main(int argc, char *argv[]) {
+    int s, nbyte;
+    //소켓 주소 구조체 선언 
+    struct sockaddr_in servaddr;
+    char buf [MAXLINE + 1];
+
+    if (argc != 2) { //인자개수가 2가 아니면 (명령어 인자 이케 들어와야함)
+        printf("Usage : %s ip_address\n", argv[0]);
+        exit(0);
+    }
+    
+    if((s = socket(AF_INET, SOCK_STREAM, 0)) < 0){
+        perror("socket");
+        exit(1);
+    }
+
+    bzero((char *)&servaddr, sizeof(servaddr)); // 서버의 소켓 구조체 servaddr을 '\0'으로 초기화
+    //servaddr의 주소 지정
+    servaddr.sin_family = AF_INET;
+    inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
+    servaddr.sin_port = htons(13);
+
+    if(connect(s, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0){
+        perror("connect");
+        exit(1);
+    }
+    if((nbyte=read(s, buf, MAXLINE)) < 0) {
+        perror("read fail");
+        exit(1);
+    }
+    buf[nbyte] = 0;
+    printf("%s", buf);
+    close(s);
+    return 0;
+}
+```
+
+
+#### bind()
+- 소켓주소(서버의 아이피, 포트번호)를 실제 소켓과 바인딩 해주는 함수
+
+```c
+int bind(
+    int s, //소켓 번호
+    struct sockaddr *addr, // 서버 자신의 소켓주소 구조체 포인터
+    int len // *addr 구조체의 크기
+);
+```
+
+바인딩 예제 코드
+
+```c
+
+#define SERV_IP "124.24.12.34"
+#define SERV_PORT 3000
+
+s = socket(AF_INET, SOCK_STREAM, 0);
+struct sockaddr_in servaddr; //sockaddr_in 구조체 변수 servaddr을 선언
+
+servaddr.sin_family = AF_INET;
+inet_pton(AF_INET, SERV_IP, &serveraddr.sin_addr); //서버 주소 구조체에 입력
+servaddr.sin_port = htons(SERV_PORT); //서버 포트 구조체에 입력
+
+bind(s, (struct sockaddr *)&servaddr, sizeof(serveraddr));
+// bind함수의 두번째 인자가 struct sockaddr *addr로 구조체 포인터다. 즉 주소를 담고있는 변수
+// 따라서 (struct sockaddr *)로 형변환 후, 뒤에 servaddr의 주소를 담고있는 &servaddr를 붙여줌
+//서버가 자동으로 자기 ip주소 바인딩 되게 하려면 이렇게 하면 된다
+//servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+```
+
+#### listen()
+
+```c
+int listen(
+    int s,//소켓번호
+    int backlog//연결을 기다리는 최대 클라이언트 수
+);
+```
+
+- 3-way 핸드쉐이크를 하게 하는 함수라고 생각하면 됨
+- 이후 accept()함수까지 호출해야 모든 설정을 받아들일 수 있음.
+
+#### accept()
+
+```c
+int accept(
+    int s, //소켓번호
+    struct sockaddr *addr, //연결요청을 한 클라이언트의 소켓 구조체
+    int *addrlen // *addr 구조체 크기의 포인터
+);
+```
+
+#### connect(), listen(), accept(), close() 함수의 동작을 tcp 3 way 핸드쉐이크와 연관하기.
+
+1. 클라이언트 측의 어플리케이션이 `connect()`를 호출하면 커널은 SYN(X)를 전송한다.
+2. 이를 수신한 서버측의 커널은 ACK(X+1)과 SYN(Y)로 응답한다.
+3. 클라이언트의 커널이 다시 ACK(Y+1)을 보냄으로써 3-way 핸드쉐이크가 완성된다.
+4. 하지만 클라이언트의 `connect()` 함수가 아직 리턴하지는 않은 상태
+5. 커널 사이에만 3way 핸드쉐이킹 완료한 상태, 만약 서버측의 어플리케이션이 미리 `listen()`을 호출하지 않았다면
+    - 서버측의 커널이 ACK(X+1)과 SYN(Y)로 응답하지 않고, RST(Reset) 패킷을 클라이언트에 전달하며
+    - `connect()` 는 `Connect refused` 에러를 리턴함
+6. 서버측의 커널은 accept 큐에 이 연결을 전달하며, 서버 에플리케이션이 `accept()`를 호출하여 accept 큐에서 하나의 연결을 꺼내가면
+    - 그 떄 클라이언트의 `connect()` 함수가 리턴하고 데이터 송수신이 가능해진다.
+
+
+#### TCP ECO SERVER
+
+```c
+// tcp_echoserv.c
+// 에코 서비스를 수행하는 서버 프로그램
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define MAXLINE 127
+
+int main(int argc, char *argv[])
+{
+    struct sockaddr_in servaddr, cliaddr;
+    int listen_sock, accp_sock,    //소켓번호
+        addrlen = sizeof(cliaddr), //소켓 주소 구조체 길이
+        nbyte;
+    char buf[MAXLINE + 1];
+    if (argc != 2)
+    { //인자개수가 2가 아니면 (명령어 인자 이케 들어와야함)
+        printf("Usage : %s portnumber \n", argv[0]);
+        exit(0);
+    }
+
+    if ((listen_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)//소켓 생성
+    {
+        perror("socket");
+        exit(0);
+    }
+
+    //servaddr을 '\0'으로 초기화
+    bzero((char *)&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(atoi(argv[1]));
+
+    //bind 호출
+    if (bind(listen_sock, (struct sockaddr *)&servaddr, sizeof(servaddr)) <0) {
+        perror("bind");
+        exit(0);
+    }
+    //소켓을 수동모드로 셋팅
+    listen(listen_sock, 5); //back log 5
+    //iterative 에코 서비스 수행
+    for(;;){
+        puts("서버가 연결 요청을 기다림..");
+        accp_sock = accept(listen_sock, (struct sockaddr*)&cliaddr, &addrlen);
+        if (accp_sock < 0) {
+            perror("accept");
+            exit(0);
+        }
+        puts("클라이언트가 연결됨..");
+        nbyte = read(accp_sock, buf, MAXLINE);
+        write(accp_sock, buf, nbyte);
+        close(accp_sock);
+    }
+    close(listen_sock);
+    return 0;
+
+}
+```
