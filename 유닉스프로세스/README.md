@@ -183,3 +183,370 @@ int execle(const char *path, const char *arg, ..., char * const envp[]);
 ```
 
 - 등등이 있다.
+
+### 좀비 프로세스의 생성 이유
+- fork로 호출로 생성된 자식 프로세스가 종료되는 상황 두가지를 예로 들면
+    - 인자를 전달하면서 exit을 호출하는 경우
+    - main 함수에서 return문을 실행하면서 값을 반환하는 경우
+- exit 함수로 전달되는 인자 값과 main 함수의 return 문으로 반환되는 값 모두 운영체제로 전달 된다.
+- 운영체제는 이 값이 자식프로세스를 생성한 부모 프로세스에게 전달 될 때 까지 자식 프로세스를 소멸시키지 않는다.
+- 이 상황에 놓여있는 프로세스를 좀비 프로세스라고 한다.
+
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+
+int main (int argc, char *argv[]){
+    pid_t pid = fork(); //자식 프로세스 생성
+
+    if (pid==0){//자식프로세스면
+        puts("자식프로세스");
+    }
+    else {
+        printf("자식프로세스의 ID : %d \n", pid);
+        sleep(30); //30초 대기
+    }
+
+    if (pid==0){
+        puts("End child process");
+    }
+    else {
+        puts("End parent process");
+    }
+    return 0;
+}
+```
+- 좀비 프로세스 생성 예제, 출력
+
+```console
+(base)  ~/Desktop/ingkle/netc   master ●  ps au           
+USER        PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
+gimsehwan 45868   0.7  0.0  4731720   5648 s003  Ss    5:59PM   0:00.21 /bin/zsh -l
+gimsehwan 45855   0.0  0.0  4268276    756 s001  S+    5:59PM   0:00.00 ./zombie
+gimsehwan 43996   0.0  0.0  4634520   6372 s001  Ss    5:53PM   0:00.64 /bin/zsh -l
+gimsehwan 32905   0.0  0.0  4440580   2848 s002  S+    4:57PM   0:00.04 ssh pi@192.168.0.100
+gimsehwan 26170   0.0  0.0  4757352   5308 s002  S     4:27PM   0:00.51 -zsh
+root      26169   0.0  0.0  4474868   4232 s002  Ss    4:27PM   0:00.05 login -pf gimsehwan
+root      45957   0.0  0.0  4399348   1488 s003  R+    5:59PM   0:00.00 ps au
+gimsehwan 45856   0.0  0.0        0      0 s001  Z+    5:59PM   0:00.00 (zombie)
+```
+
+- `Z+`로 좀비프로세스 임을 확인 할 수 있다.
+
+## 좀비 프로세스의 소멸
+
+- 자식 프로세스의 소멸을 위해서는 부모 프로세스가 자식 프로세스의 전달 값을 요청해야 한다.
+- 요청에는 두가지 방법이 있다.
+    - 1. 함수 호출
+
+```c
+#include <sys/wait.h>
+
+pid_t wait(int * statloc);
+//성공시 종료된 자식 프로세스의 ID, 실패시 -1 반환
+```
+
+- 위 함수가 호출되었을 때, 이미 종료된 자식 프로세스가 있다면
+- 자식 프로세스가 종료되면서 전달한 값 (exit 함수의 인자 값, main 함수의 return에 의한 반환값)이 매개변수로 전달된 주소의 변수에 저장됨
+- 이 변수에 저장되는 값에는 자식 프로세스가 종료되면서 전달한 값 이와에도 다른 정보가 함께 있다.
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(int argc, char *argv[]){
+    int status;
+    pid_t pid = fork();
+    
+    if (pid==0){
+        return 3; //이 자식 프로세스는 메인 함수 내에서 return으로 종료된다.
+    } else {
+        printf("child PID %d\n", pid);
+        pid = fork();
+        if (pid==0) {
+            exit(7); // 이 자식 프로세스는 exir(7)을 통해 exit함수 호출을 해 종료된다.
+        } else {
+            printf("child PID %d\n", pid); //return으로 종료되는 
+            wait(&status);
+            if(WIFEXITED(status)) {
+                printf("child send one : %d \n", WEXITSTATUS((status)));
+            }
+            wait(&status);
+            if(WIFEXITED(status)){
+                printf("child send two : %d \n", WEXITSTATUS((status)));
+            }
+            sleep(30); //sleep 30 sec
+        }
+    }
+    return 0;
+}
+```
+
+```console
+gcc wait.c -o wait && "/Users/gimsehwan/Desktop/ingkle/netc/유닉스프로세스/"wait
+child PID 55606
+child PID 55606
+child PID 55607
+child send one : 3 
+child send two : 7 
+```
+
+- 두 자식 프로세스가 전달한 값 3과 7이 부모프로세스로 전달되었다.
+- wait 함수는 호출된 시점에서 종료된 자식 프로세스가 없다면, 임의의 자식프로세스가 종료될 때 까지 블로킹 상태에 놓인다.
+    - 주의해서 사용해야 한다.
+
+### 두번째 방법 : waitpid 함수
+- wait 함수의 블로킹이 문제가 된다면, waitpid 함수의 호출을 고려해보자.
+
+```c
+#include <sys/wait.h>
+
+pid_t waitpid(pid_t pid, int * statloc, int options);
+//성공시 자식프로세스의 ID 또는 0, 실패시 -1
+// pid <- 종료를 확인하고자 하는 자식 프로세스의 id 전달, -1을 전달하면 임의의 자식프루세스가 종료되기를 기다림
+// statloc -> wait 함수의 매개변수, statloc과 동일한 의미
+// options 헤더파일 sys/wait.h에 선언된 상수 WNOHANG을 인자로 전달하면, 종료된 자식프로세스가 없더라도
+// 블로킹 상태에 있지 않고, 0을 반환하면서 함수를 빠져나온다.
+```
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(int argc, char *argv[]){
+    int status;
+    pid_t pid = fork();
+    
+    if(pid==0){
+        sleep(15); //자식 프로세스의 종료를 지연시키기 위해 15초 기다림
+        return 24;
+    }
+    else {
+        while(!waitpid(-1, &status, WNOHANG)) { //while문 안에서 waitpid 함수 호출
+            sleep(3);
+            puts("sleep 3sec \n");
+        }
+        if(WIFEXITED(status)) {
+            printf("child send %d \n", WEXITSTATUS(status));
+        }
+    }
+    return 0;
+}
+```
+
+```console
+sleep 3sec 
+
+sleep 3sec 
+
+sleep 3sec 
+
+sleep 3sec 
+
+sleep 3sec 
+
+child send 24 
+Program ended with exit code: 0
+```
+
+- 5회 3sec이 실행되었다. waitpid 함수가 블로킹 되지 않았음을 증명하는 결과이기도 하다.
+
+
+### 시그널 핸들링
+- 도대체 자식 프로세스가 언제 종료될 줄 알고 waitpid를 계속 호출하겠는가
+- 부모 프로세스도 자식만큼이나 바쁘다.
+- 시그널 핸들링을 이용해
+    - 시그널이 발생했을 때 부모프로세스가 해당 상황에 대한 작업을 하는게 좋겠다.
+    - 핸들링, 혹은 뭐 핸들러 함수라고도 많이 하는듯.
+
+#### 시그널과 signal 함수
+- 프로세스 : 야 운영체제야, 내가 만든 자식 프로세스가 종료되면 zombie_handler 함수 호출좀 해줘
+- 운영체제 : 오키 그럴테니까 넌 zombie_handler 잘 만들어놔
+
+```c
+#include <signal>
+
+void (*signal(int signo, void(*func)(int)))(int);
+// 시그널 발생시 호출되도록 등록된 함수의 포인터 반환
+```
+
+- 함수 이름 signal
+    - 매개변수
+        - int signo, void(*func)(int)
+    - 반환형
+        - 매개변수형이 int이고, 반환형이 void인 함수 포인터
+- 그니까 매개변수에도 함수 포인터가 있고, 리턴형도 함수포인터다.
+
+- signo으로 정의된 몇몇 상수를 정리해보자
+    - SIGALRM : alarm 함수 호출을 통해 등록된 시간이 된 상황
+    - SIGINT : CTRL + C 가 입력된 상황
+    - SIGCHLD : 자식 프로세스가 종료된 상황
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+#include <signal.h>
+
+void timeout(int sig) {
+    if(sig==SIGALRM){
+        puts("Time out !");
+    }
+    alarm(2);
+}
+//signal의 두번째 인자로 함수 포인터가 들어와야 하며, 반환형은 void, 인자는 Int 이다.
+//timeout을 singal에 등록해주기만 하면, timeout()이 아닌, timeout은 함수의 주소를 의미(포인터) 이기 때문에 등록 가능.
+
+void keycontrol(int sig){
+    if(sig==SIGINT){
+        puts("CTRL + C pressed");
+    }
+}
+    
+int main(int argc, char *argv[]) {
+    int i;
+    signal(SIGALRM, timeout);
+    signal(SIGINT, keycontrol);
+    alarm(2);
+    
+    for(i = 0; i < 3; i++){
+        puts("wait..");
+        sleep(100); //100sec의 sleep을 걸었지만, signal에 등록한 함수중 하나가, 2초 후 alarm을 발생하는 함수이다(timeout)
+        // 시그널이 발생하면 블로킹 상태에 있던 프로세스가 깨어난다는 의미다 !
+    }
+    return 0;
+    }
+```
+
+#### sigaction 함수를 이용한 시그널 핸들링
+
+- signal은 유닉스 계열의 운영체제에서 동작 방식이 약간씩 차이가 날 수 있지만
+- sigaction은 완전히 동일한 동작을 보장한다.
+
+```c
+#include <signal.h>
+
+int sigaction(int signo, const struct sigaction * act, struct sigaction * oldact);
+// 성공시 0, 실패시 -1
+// signo <- 시그널의 정보를 인자로 전달
+// act <- 첫 번째 인자로 전달된 상수에 해당하는 시그널 발생시, 호출될 함수(시그널 핸들러)의 정보 전달
+// oldact <- 이전에 등록되었던 시그널 핸들러의 함수 포인터를 얻는데 사용되는 인자, 팔요 없다면 0을 전달
+```
+
+- 위 함수의 호출을 위해서는 sigaction 이라는 구조체 변수를 선언 및 초기화 해야 한다.
+
+```c
+struct sigaction {
+    void (*sa_handler)(int); //시그널 핸들러 함수의 함수 포인터
+    sigset_t sa_mask;
+    int sa_flags;
+}
+```
+
+- sa_handler에 시그널 핸들러의 함수 포인터를 저장하면 된다. sa_mask 및 sa_flags는 0으로 초기화.
+
+- 이번엔 내가 이런 API 문서를 이용해 직접 구현해봤다.
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+
+void timeout(int sig) {
+    if(sig==SIGALRM){
+        puts("Time out !");
+    }
+    alarm(2);
+}
+
+void keycontrol(int sig){
+    if(sig==SIGINT){
+        puts("CTRL + C pressed");
+    }
+}
+    
+int main(int argc, char *argv[]) {
+    int i;
+    struct sigaction *sigato = (struct sigaction *)malloc(sizeof(struct sigaction)); //sigaction 함수의 핸들러 함수를 등록하기 위해 sigaction 구조체의 포인터 변수 선언
+    struct sigaction *sigakc = (struct sigaction *)malloc(sizeof(struct sigaction)); //sigaction 함수의 핸들러 함수를 등록하기 위해 sigaction 구조체의 포인터 변수 선언
+    sigato->sa_handler = timeout; //각 구조체 변수의 멤버 변수인 sa_handler 에 각 핸들러 함수 등록
+    sigakc->sa_handler = keycontrol;
+    memset(&(sigato->sa_mask),0, sizeof(sigato->sa_mask)); //sigemptyset 이라는 함수도 있지만, memset을 이용해 sa_mask의 모든 바이트을 0으로 초기화
+    memset(&(sigakc->sa_mask),0, sizeof(sigato->sa_mask));
+    sigato->sa_flags = 0; //sa_flags는 우선 0으로 셋
+    sigakc->sa_flags = 0;
+    sigaction(SIGALRM, sigato, 0); //sigaction 이라는 함수를 이용해 sigato 구조체 포인터 변수(이 안에 핸들러 등록되어있음)를 등록해 핸들러 선언
+    sigaction(SIGINT, sigakc, 0);
+    alarm(2);
+    
+    for(i = 0; i < 3; i++){
+        puts("wait..");
+        sleep(100);
+    }
+    return 0;
+    }
+```
+
+- 시그널 핸들러 등록 과정이 조금 뭣같지만, 예제 코드와 동일하게 동작한다!
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+
+void read_childproc(int sig){
+    int status;
+    pid_t id = waitpid(-1, &status, WNOHANG);
+    
+    if(WIFEXITED(status)) {
+        printf("removed proc id %d\n", id);
+        printf("child send : %d \n", WEXITSTATUS(status));
+    }
+}
+
+int main (void){
+    pid_t pid;
+    struct sigaction *act = (struct sigaction *)malloc(sizeof(struct sigaction));
+    act->sa_handler = read_childproc;
+    sigemptyset(&(act->sa_mask));
+    act->sa_flags = 0;
+    sigaction(SIGCHLD, act, 0);
+    
+    pid = fork();
+    if(pid ==0){
+        puts("hello I'm child process");
+        sleep(10);
+        return 12;
+    }
+    else {
+        printf("child proc id : %d \n", pid);
+        pid = fork();
+        if(pid == 0){
+            puts("hello I'm child process");
+            sleep(10);
+            return 24;
+        }
+        else {
+            int i;
+            printf("Child proc id : %d \n", pid);
+            for (i=0; i<5; i++){
+                puts("wait....");
+                sleep(5);
+            }
+        }
+    }
+    return 0;
+}
+
+```
